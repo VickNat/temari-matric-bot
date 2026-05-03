@@ -29,7 +29,7 @@ var (
 // A map to store user data userid -> phone number or email
 var userStore = make(map[int64]string)
 
-const adminID = 8517909375
+var adminID = os.Getenv("ADMIN_ID")
 
 func validateContact(input string) (string, bool) {
 	input = strings.TrimSpace(input)
