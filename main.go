@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"log"
 	"os"
 	"regexp"
@@ -29,7 +30,7 @@ var (
 // A map to store user data userid -> phone number or email
 var userStore = make(map[int64]string)
 
-var adminID = os.Getenv("ADMIN_ID")
+var adminID, _ = strconv.ParseInt(os.Getenv("ADMIN_ID"), 10, 64)
 
 func validateContact(input string) (string, bool) {
 	input = strings.TrimSpace(input)
