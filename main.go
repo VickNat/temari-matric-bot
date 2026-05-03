@@ -79,10 +79,8 @@ func sendPaymentInstructions(c tele.Context) error {
 }
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	// Silently fail if the .env file is not found
+	_ = godotenv.Load()
 
 	pref := tele.Settings{
 		Token:  os.Getenv("TOKEN"),
