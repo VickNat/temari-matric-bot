@@ -215,7 +215,7 @@ func main() {
 		// 2. Notify the Student
 		successMsg := "🎉 *Access Granted!*\n\n" +
 			"Your premium access has been activated. Please **close the app and open it again** to gain full access.\n\n" +
-			"Join our channel for latest updates: [Temari Channel](https://t.me/your_channel)\n\n" +
+			"Join our channel for latest updates: [Temari Channel](https://t.me/temariapp)\n\n" +
 			"If you have any issues, contact @TemariAppSupport."
 
 		_, err = b.Send(tele.ChatID(targetUserID), successMsg, tele.ModeMarkdown)
