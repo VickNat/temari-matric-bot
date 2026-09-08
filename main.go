@@ -60,6 +60,17 @@ func generateTelegramUserLink(userName string, userID int64) string {
 	return fmt.Sprintf(`No username available. User ID: %d`, userID)
 }
 
+func sendContactRequest(c tele.Context) error {
+	contactRequest := "To proceed, please send us the *Email* or *Phone Number* you used (or will use) for your Temari account.\n\n" +
+		"Example: `0912345678` or `example@email.com`"
+
+	if c.Callback() != nil {
+		return c.Edit(contactRequest, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+	}
+
+	return c.Send(contactRequest, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+}
+
 func sendPaymentInstructions(c tele.Context) error {
 	paymentInstructions := "To get Premium access:\n\n" +
 		"1. Transfer 150 ETB to *one* of the following accounts:\n\n" +
@@ -130,6 +141,14 @@ func main() {
 
 	// 3. Handle the "Pay" button click
 	b.Handle(&btnPay, func(c tele.Context) error {
+		userID := c.Sender().ID
+
+		// If we don't already have their email or phone number, ask for it first
+		// before showing the payment steps.
+		if _, exists := userStore[userID]; !exists {
+			return sendContactRequest(c)
+		}
+
 		return sendPaymentInstructions(c)
 	})
 
@@ -140,9 +159,12 @@ func main() {
 
 		contactInfo, exists := userStore[userID]
 
-		// If we don't have their email or phone number yet, we accept the screenshot and ask them to send their contact info
+		// If we don't have their email or phone number yet, ask for it before accepting the screenshot
 		if !exists {
-			return c.Send("I've received your screenshot, but I don't have your account info yet. Please type your Email or Phone Number first, then send the screenshot again!")
+			if err := c.Send("I've received your screenshot, but I don't have your account info yet."); err != nil {
+				return err
+			}
+			return sendContactRequest(c)
 		}
 
 		// If we have their email or phone number, we can proceed with the payment verification
@@ -196,7 +218,10 @@ func main() {
 
 		if isValid {
 			userStore[userID] = input
-			return c.Send(fmt.Sprintf("✅ Linked to %s: `%s`\n\nNow, please upload the payment screenshot to finish.", contactType, input))
+			if err := c.Send(fmt.Sprintf("✅ Linked to %s: `%s`", contactType, input), &tele.SendOptions{ParseMode: tele.ModeMarkdown}); err != nil {
+				return err
+			}
+			return sendPaymentInstructions(c)
 		}
 
 		return c.Send("❌ I didn't recognize that as a valid Email or Ethiopian Phone Number. Please try again.")
