@@ -61,7 +61,8 @@ func generateTelegramUserLink(userName string, userID int64) string {
 }
 
 func sendContactRequest(c tele.Context) error {
-	contactRequest := "To proceed, please send us the *Email* or *Phone Number* you used (or will use) for your Temari account.\n\n" +
+	contactRequest := "To proceed, please send us a *screenshot of your Temari App profile page* (showing your registered Email or Phone Number).\n\n" +
+		"OR, \n\n you can just type the *Email* or *Phone Number* you used to register on the Temari App here directly.\n\n" +
 		"Example: `0912345678` or `example@email.com`"
 
 	if c.Callback() != nil {
@@ -159,12 +160,31 @@ func main() {
 
 		contactInfo, exists := userStore[userID]
 
-		// If we don't have their email or phone number yet, ask for it before accepting the screenshot
+		// If we don't have their email or phone number yet, treat this photo as their
+		// Temari app profile screenshot: forward it to the admin for identification,
+		// then move them on to the payment steps.
 		if !exists {
-			if err := c.Send("I've received your screenshot, but I don't have your account info yet."); err != nil {
+			profileCaption := fmt.Sprintf("📋 <b>PROFILE SCREENSHOT</b> (for identification)\n\n"+
+				"<b>User:</b> %s\n"+
+				"<b>ID:</b> <code>%d</code>",
+				generateTelegramUserLink(userName, userID), userID)
+
+			profilePhoto := &tele.Photo{
+				File:    c.Message().Photo.File,
+				Caption: profileCaption,
+			}
+
+			if _, err := b.Send(tele.ChatID(adminID), profilePhoto, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
+				log.Println("Failed to forward profile screenshot to admin:", err)
+				return c.Send("Something went wrong while receiving your screenshot. Please try again or contact @TemariAppSupport.")
+			}
+
+			userStore[userID] = "[Profile Screenshot]"
+
+			if err := c.Send("✅ Got your profile screenshot!"); err != nil {
 				return err
 			}
-			return sendContactRequest(c)
+			return sendPaymentInstructions(c)
 		}
 
 		// If we have their email or phone number, we can proceed with the payment verification
