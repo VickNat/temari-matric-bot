@@ -19,7 +19,7 @@ import (
 var (
 	btnLangEN     = tele.Btn{Unique: "lang_en"}
 	btnLangAM     = tele.Btn{Unique: "lang_am"}
-	btnConfirmPay = tele.Btn{Unique: "grant_access"}
+	btnConfirmPay = tele.Btn{Unique: "grant_access", Text: "✅ Confirm Payment"}
 )
 
 func buildLanguageMenu() *tele.ReplyMarkup {
