@@ -14,18 +14,21 @@ import (
 	tele "gopkg.in/telebot.v4"
 )
 
+// Buttons are declared here only to give Handle(&btn, ...) a stable Unique
+// to match against; their Text is set per-language when the keyboard is built.
 var (
-	// Main Menu Keyboard
-	menu       = &tele.ReplyMarkup{}
-	btnPay     = menu.Data("💳 Pay 150 ETB", "pay_flow")
-	btnSupport = menu.URL("📞 Contact Support", "https://t.me/TemariAppSupport")
+	btnLangEN     = tele.Btn{Unique: "lang_en"}
+	btnLangAM     = tele.Btn{Unique: "lang_am"}
+	btnConfirmPay = tele.Btn{Unique: "grant_access"}
 )
 
-var (
-	// Admin Approval Keyboard
-	adminMenu     = &tele.ReplyMarkup{}
-	btnConfirmPay = adminMenu.Data("✅ Confirm Payment", "grant_access")
-)
+func buildLanguageMenu() *tele.ReplyMarkup {
+	m := &tele.ReplyMarkup{}
+	enBtn := m.Data(t(LangEN, "btn_lang_en"), btnLangEN.Unique)
+	amBtn := m.Data(t(LangEN, "btn_lang_am"), btnLangAM.Unique)
+	m.Inline(m.Row(enBtn, amBtn))
+	return m
+}
 
 // A map to store user data userid -> phone number or email
 var userStore = make(map[int64]string)
@@ -60,10 +63,12 @@ func generateTelegramUserLink(userName string, userID int64) string {
 	return fmt.Sprintf(`No username available. User ID: %d`, userID)
 }
 
-func sendContactRequest(c tele.Context) error {
-	contactRequest := "To proceed, please send us a *screenshot of your Temari App profile page* (showing your registered Email or Phone Number).\n\n" +
-		"OR, \n\n you can just type the *Email* or *Phone Number* you used to register on the Temari App here directly.\n\n" +
-		"Example: `0912345678` or `example@email.com`"
+func sendLanguageSelection(c tele.Context) error {
+	return c.Send(t(LangEN, "language_prompt"), buildLanguageMenu())
+}
+
+func sendContactRequest(c tele.Context, lang Lang) error {
+	contactRequest := t(lang, "contact_request")
 
 	if c.Callback() != nil {
 		return c.Edit(contactRequest, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
@@ -72,22 +77,39 @@ func sendContactRequest(c tele.Context) error {
 	return c.Send(contactRequest, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 }
 
-func sendPaymentInstructions(c tele.Context) error {
-	paymentInstructions := "To get Premium access:\n\n" +
-		"1. Transfer 150 ETB to *one* of the following accounts:\n\n" +
-		"🏦 *CBE*\n" +
-		"`1000415850388`\n" +
-		"_Name_: Natanim Ashenafi\n\n" +
-		"📱 *Telebirr*\n" +
-		"`0983082255`\n" +
-		"_Name_: Natanim Ashenafi\n\n" +
-		"2. *Send a SCREENSHOT of your receipt here.*"
+func sendPaymentInstructions(c tele.Context, lang Lang) error {
+	paymentInstructions := t(lang, "payment_instructions")
 
 	if c.Callback() != nil {
 		return c.Edit(paymentInstructions, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 	}
 
 	return c.Send(paymentInstructions, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+}
+
+// handleLanguageChosen records the user's language pick, then continues straight
+// into payment instructions (if we already have their contact info, e.g. from a
+// valid /start payload) or the contact request, in that language.
+func handleLanguageChosen(c tele.Context, lang Lang) error {
+	userID := c.Sender().ID
+	userLang[userID] = lang
+
+	if _, exists := userStore[userID]; exists {
+		return sendPaymentInstructions(c, lang)
+	}
+
+	return sendContactRequest(c, lang)
+}
+
+func contactTypeLabel(lang Lang, contactType string) string {
+	switch contactType {
+	case "email":
+		return t(lang, "contact_type_email")
+	case "phone":
+		return t(lang, "contact_type_phone")
+	default:
+		return contactType
+	}
 }
 
 func main() {
@@ -105,13 +127,8 @@ func main() {
 		return
 	}
 
-	// 1. Define the Main Menu layout
-	menu.Inline(
-		menu.Row(btnPay),
-		menu.Row(btnSupport),
-	)
-
-	// 2. Update your /start handler to show the menu
+	// 1. /start always opens with the language picker. A valid contact from the
+	// payload is stored right away so it's ready the moment a language is picked.
 	b.Handle("/start", func(ctx tele.Context) error {
 		payload := ctx.Message().Payload
 		userID := ctx.Message().Sender.ID
@@ -120,43 +137,35 @@ func main() {
 			decodedPayload, err := base64.StdEncoding.DecodeString(payload)
 			if err != nil {
 				log.Println("Error decoding payload:", err)
-				return ctx.Send("Error processing your request. Please try again.", menu)
+			} else {
+				decoded := string(decodedPayload)
+				log.Println("Decoded payload:", decoded)
+
+				if _, isValid := validateContact(decoded); isValid {
+					userStore[userID] = decoded
+					log.Println("User", userID, "has provided email or phone number:", decoded)
+				} else {
+					log.Println("User", userID, "has provided INVALID email or phone number:", decoded)
+				}
 			}
-
-			payload = string(decodedPayload)
-
-			log.Println("Decoded payload:", payload)
-			_, isValid := validateContact(payload)
-
-			if isValid {
-				userStore[userID] = payload
-				log.Println("User", userID, "has provided email or phone number:", payload)
-				return sendPaymentInstructions(ctx)
-			}
-			log.Println("User", userID, "has provided INVALID email or phone number:", payload)
-			// If the payload is not a valid email or phone number, continue with the normal flow
 		}
 
-		return ctx.Send("Hello Temari! 🇪🇹\nUnlock all past Matric exams for 150 ETB.", menu)
+		return sendLanguageSelection(ctx)
 	})
 
-	// 3. Handle the "Pay" button click
-	b.Handle(&btnPay, func(c tele.Context) error {
-		userID := c.Sender().ID
-
-		// If we don't already have their email or phone number, ask for it first
-		// before showing the payment steps.
-		if _, exists := userStore[userID]; !exists {
-			return sendContactRequest(c)
-		}
-
-		return sendPaymentInstructions(c)
+	// 2. Handle language selection
+	b.Handle(&btnLangEN, func(c tele.Context) error {
+		return handleLanguageChosen(c, LangEN)
+	})
+	b.Handle(&btnLangAM, func(c tele.Context) error {
+		return handleLanguageChosen(c, LangAM)
 	})
 
-	// 4. Handle the screenshot upload
+	// 3. Handle the screenshot upload
 	b.Handle(tele.OnPhoto, func(c tele.Context) error {
 		userID := c.Message().Sender.ID
 		userName := c.Message().Sender.Username
+		lang := getLang(userID)
 
 		contactInfo, exists := userStore[userID]
 
@@ -176,15 +185,15 @@ func main() {
 
 			if _, err := b.Send(tele.ChatID(adminID), profilePhoto, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
 				log.Println("Failed to forward profile screenshot to admin:", err)
-				return c.Send("Something went wrong while receiving your screenshot. Please try again or contact @TemariAppSupport.")
+				return c.Send(t(lang, "profile_screenshot_error"))
 			}
 
 			userStore[userID] = "[Profile Screenshot]"
 
-			if err := c.Send("✅ Got your profile screenshot!"); err != nil {
+			if err := c.Send(t(lang, "profile_screenshot_received")); err != nil {
 				return err
 			}
-			return sendPaymentInstructions(c)
+			return sendPaymentInstructions(c, lang)
 		}
 
 		// If we have their email or phone number, we can proceed with the payment verification
@@ -213,18 +222,18 @@ func main() {
 
 		if err != nil {
 			log.Println("Failed to forward to admin:", err)
-			return c.Send("Something went wrong while sending your proof. Please contact @TemariAppSupport.")
+			return c.Send(t(lang, "proof_error"))
 		}
 
-		return c.Send("✅ *Proof Sent!*\n\nOur team is now verifying your payment. You will receive a notification here once your account is activated.")
+		return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 	})
 
-	// 5. Handle non-photo messages (Error handling)
+	// 4. Handle non-photo messages (Error handling)
 	b.Handle(tele.OnDocument, func(c tele.Context) error {
-		return c.Send("Please send the receipt as a **Photo** (Image), not as a file/document. This helps us verify it faster!")
+		return c.Send(t(getLang(c.Sender().ID), "doc_not_photo"))
 	})
 
-	// 6. Handle manual text input for email/phone
+	// 5. Handle manual text input for email/phone
 	b.Handle(tele.OnText, func(c tele.Context) error {
 		// Ignore commands like /start
 		if strings.HasPrefix(c.Text(), "/") {
@@ -232,22 +241,24 @@ func main() {
 		}
 
 		userID := c.Sender().ID
+		lang := getLang(userID)
 		input := c.Text()
 
 		contactType, isValid := validateContact(input)
 
 		if isValid {
 			userStore[userID] = input
-			if err := c.Send(fmt.Sprintf("✅ Linked to %s: `%s`", contactType, input), &tele.SendOptions{ParseMode: tele.ModeMarkdown}); err != nil {
+			linkedMsg := fmt.Sprintf(t(lang, "linked_contact"), contactTypeLabel(lang, contactType), input)
+			if err := c.Send(linkedMsg, &tele.SendOptions{ParseMode: tele.ModeMarkdown}); err != nil {
 				return err
 			}
-			return sendPaymentInstructions(c)
+			return sendPaymentInstructions(c, lang)
 		}
 
-		return c.Send("❌ I didn't recognize that as a valid Email or Ethiopian Phone Number. Please try again.")
+		return c.Send(t(lang, "invalid_contact"))
 	})
 
-	// 7. Handle Admin clicking "Confirm Payment"
+	// 6. Handle Admin clicking "Confirm Payment"
 	b.Handle(&btnConfirmPay, func(c tele.Context) error {
 		// 1. Extract the target userID from the callback data
 		targetUserIDStr := c.Data()
@@ -257,11 +268,8 @@ func main() {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Error: Could not parse User ID"})
 		}
 
-		// 2. Notify the Student
-		successMsg := "🎉 *Access Granted!*\n\n" +
-			"Your premium access has been activated. Please **close the app and open it again** to gain full access.\n\n" +
-			"Join our channel for latest updates: [Temari Channel](https://t.me/temariapp)\n\n" +
-			"If you have any issues, contact @TemariAppSupport."
+		// 2. Notify the Student, in their chosen language
+		successMsg := t(getLang(targetUserID), "access_granted")
 
 		_, err = b.Send(tele.ChatID(targetUserID), successMsg, tele.ModeMarkdown)
 		if err != nil {
