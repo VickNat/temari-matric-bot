@@ -33,6 +33,11 @@ func buildLanguageMenu() *tele.ReplyMarkup {
 // A map to store user data userid -> phone number or email
 var userStore = make(map[int64]string)
 
+// pendingProfileScreenshot holds a user's profile screenshot (received at the
+// contact-request step) until their payment proof screenshot arrives, so the
+// two can be forwarded to the admin together as one album.
+var pendingProfileScreenshot = make(map[int64]tele.File)
+
 var adminID, _ = strconv.ParseInt(os.Getenv("ADMIN_ID"), 10, 64)
 
 func validateContact(input string) (string, bool) {
@@ -170,24 +175,11 @@ func main() {
 		contactInfo, exists := userStore[userID]
 
 		// If we don't have their email or phone number yet, treat this photo as their
-		// Temari app profile screenshot: forward it to the admin for identification,
-		// then move them on to the payment steps.
+		// Temari app profile screenshot. We hold onto it rather than forwarding it
+		// right away, so it can be sent to the admin together with the payment proof
+		// once that arrives.
 		if !exists {
-			profileCaption := fmt.Sprintf("📋 <b>PROFILE SCREENSHOT</b> (for identification)\n\n"+
-				"<b>User:</b> %s\n"+
-				"<b>ID:</b> <code>%d</code>",
-				generateTelegramUserLink(userName, userID), userID)
-
-			profilePhoto := &tele.Photo{
-				File:    c.Message().Photo.File,
-				Caption: profileCaption,
-			}
-
-			if _, err := b.Send(tele.ChatID(adminID), profilePhoto, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
-				log.Println("Failed to forward profile screenshot to admin:", err)
-				return c.Send(t(lang, "profile_screenshot_error"))
-			}
-
+			pendingProfileScreenshot[userID] = c.Message().Photo.File
 			userStore[userID] = "[Profile Screenshot]"
 
 			if err := c.Send(t(lang, "profile_screenshot_received")); err != nil {
@@ -209,20 +201,33 @@ func main() {
 
 		adminMarkup.Inline(adminMarkup.Row(btnWithData))
 
-		photo := &tele.Photo{
-			File:    c.Message().Photo.File,
-			Caption: caption,
-		}
+		paymentPhoto := &tele.Photo{File: c.Message().Photo.File}
 
-		// Forward to admin
-		_, err := b.Send(tele.ChatID(adminID), photo, &tele.SendOptions{
-			ParseMode:   tele.ModeHTML,
-			ReplyMarkup: adminMarkup,
-		})
+		if profileFile, hasProfileScreenshot := pendingProfileScreenshot[userID]; hasProfileScreenshot {
+			// Send both screenshots together as one album, caption on the first item.
+			profilePhoto := &tele.Photo{File: profileFile, Caption: caption}
 
-		if err != nil {
-			log.Println("Failed to forward to admin:", err)
-			return c.Send(t(lang, "proof_error"))
+			if _, err := b.SendAlbum(tele.ChatID(adminID), tele.Album{profilePhoto, paymentPhoto}, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
+				log.Println("Failed to forward payment proof album to admin:", err)
+				return c.Send(t(lang, "proof_error"))
+			}
+			delete(pendingProfileScreenshot, userID)
+
+			// Media groups can't carry an inline keyboard, so the Confirm button
+			// goes out as its own follow-up message.
+			if _, err := b.Send(tele.ChatID(adminID), "⬆️ Tap below to confirm the payment above.", adminMarkup); err != nil {
+				log.Println("Failed to send confirm-payment button to admin:", err)
+			}
+		} else {
+			paymentPhoto.Caption = caption
+
+			if _, err := b.Send(tele.ChatID(adminID), paymentPhoto, &tele.SendOptions{
+				ParseMode:   tele.ModeHTML,
+				ReplyMarkup: adminMarkup,
+			}); err != nil {
+				log.Println("Failed to forward to admin:", err)
+				return c.Send(t(lang, "proof_error"))
+			}
 		}
 
 		return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
@@ -281,14 +286,21 @@ func main() {
 		// This is the line you need to add:
 		delete(userStore, targetUserID)
 
-		newCaption := c.Message().Caption + "\n\n✅ <b>STATUS: Access Granted</b>"
-
-		_, err = b.EditCaption(c.Message(), newCaption, &tele.SendOptions{
-			ParseMode: tele.ModeHTML,
-		})
+		// The Confirm button sits on a photo caption (single-screenshot case) or a
+		// plain text message (album case, since media groups can't carry buttons).
+		statusSuffix := "\n\n✅ <b>STATUS: Access Granted</b>"
+		if c.Message().Photo != nil {
+			_, err = b.EditCaption(c.Message(), c.Message().Caption+statusSuffix, &tele.SendOptions{
+				ParseMode: tele.ModeHTML,
+			})
+		} else {
+			_, err = b.Edit(c.Message(), c.Message().Text+statusSuffix, &tele.SendOptions{
+				ParseMode: tele.ModeHTML,
+			})
+		}
 
 		if err != nil {
-			log.Println("EditCaption error:", err)
+			log.Println("Failed to update admin message status:", err)
 			// If editing fails, we still want to stop the loading spinner
 		}
 
