@@ -33,10 +33,11 @@ func buildLanguageMenu() *tele.ReplyMarkup {
 // A map to store user data userid -> phone number or email
 var userStore = make(map[int64]string)
 
-// pendingProfileScreenshot holds a user's profile screenshot (received at the
-// contact-request step) until their payment proof screenshot arrives, so the
-// two can be forwarded to the admin together as one album.
-var pendingProfileScreenshot = make(map[int64]tele.File)
+// pendingPaymentScreenshot holds a user's payment proof screenshot (received
+// before we know who they are) until their contact info arrives — either as a
+// profile screenshot or typed text — so both can be forwarded to the admin
+// together as one album.
+var pendingPaymentScreenshot = make(map[int64]tele.File)
 
 // adminID is set in main(), after .env is loaded — a package-level initializer
 // would run before godotenv.Load() and always see an empty ADMIN_ID.
@@ -94,18 +95,59 @@ func sendPaymentInstructions(c tele.Context, lang Lang) error {
 	return c.Send(paymentInstructions, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 }
 
-// handleLanguageChosen records the user's language pick, then continues straight
-// into payment instructions (if we already have their contact info, e.g. from a
-// valid /start payload) or the contact request, in that language.
-func handleLanguageChosen(c tele.Context, lang Lang) error {
-	userID := c.Sender().ID
-	userLang[userID] = lang
+// forwardPaymentProofToAdmin sends the user's payment screenshot to the admin
+// with the Confirm Payment button. If profileFile is non-nil, it's combined
+// with the payment screenshot into one album (captioned on the first item),
+// since media groups can't carry an inline keyboard — the button then goes out
+// as a small follow-up message instead of sitting directly on the photo.
+func forwardPaymentProofToAdmin(b *tele.Bot, userID int64, userName, contactInfo string, paymentFile tele.File, profileFile *tele.File) error {
+	caption := fmt.Sprintf("🚨 <b>NEW PAYMENT PROOF</b>\n\n"+
+		"<b>User:</b> %s\n"+
+		"<b>ID:</b> <code>%d</code>\n"+
+		"<b>Account:</b> <code>%s</code>",
+		generateTelegramUserLink(userName, userID), userID, contactInfo)
 
-	if _, exists := userStore[userID]; exists {
-		return sendPaymentInstructions(c, lang)
+	adminMarkup := &tele.ReplyMarkup{}
+	btnWithData := btnConfirmPay
+	btnWithData.Data = fmt.Sprintf("%d", userID)
+	adminMarkup.Inline(adminMarkup.Row(btnWithData))
+
+	paymentPhoto := &tele.Photo{File: paymentFile}
+
+	if profileFile == nil {
+		paymentPhoto.Caption = caption
+		if _, err := b.Send(tele.ChatID(adminID), paymentPhoto, &tele.SendOptions{
+			ParseMode:   tele.ModeHTML,
+			ReplyMarkup: adminMarkup,
+		}); err != nil {
+			return err
+		}
+		log.Printf("[photo] user=%d single payment-proof photo with confirm button sent to admin", userID)
+		return nil
 	}
 
-	return sendContactRequest(c, lang)
+	profilePhoto := &tele.Photo{File: *profileFile, Caption: caption}
+	if _, err := b.SendAlbum(tele.ChatID(adminID), tele.Album{profilePhoto, paymentPhoto}, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
+		return err
+	}
+	log.Printf("[photo] user=%d album sent to admin", userID)
+
+	// Media groups can't carry an inline keyboard, so the Confirm button
+	// goes out as its own follow-up message.
+	if _, err := b.Send(tele.ChatID(adminID), "⬆️ Tap below to confirm the payment above.", adminMarkup); err != nil {
+		log.Println("Failed to send confirm-payment button to admin:", err)
+	} else {
+		log.Printf("[photo] user=%d confirm-payment button sent to admin", userID)
+	}
+	return nil
+}
+
+// handleLanguageChosen records the user's language pick, then always continues
+// into payment instructions first — contact info is asked for afterward, once
+// the payment screenshot arrives.
+func handleLanguageChosen(c tele.Context, lang Lang) error {
+	userLang[c.Sender().ID] = lang
+	return sendPaymentInstructions(c, lang)
 }
 
 func contactTypeLabel(lang Lang, contactType string) string {
@@ -184,75 +226,44 @@ func main() {
 		userName := c.Message().Sender.Username
 		lang := getLang(userID)
 
-		contactInfo, exists := userStore[userID]
+		contactInfo, hasContact := userStore[userID]
+		pendingFile, hasPendingPayment := pendingPaymentScreenshot[userID]
 
-		log.Printf("[photo] user=%d has_contact=%v", userID, exists)
+		log.Printf("[photo] user=%d has_contact=%v has_pending_payment=%v", userID, hasContact, hasPendingPayment)
 
-		// If we don't have their email or phone number yet, treat this photo as their
-		// Temari app profile screenshot. We hold onto it rather than forwarding it
-		// right away, so it can be sent to the admin together with the payment proof
-		// once that arrives.
-		if !exists {
-			pendingProfileScreenshot[userID] = c.Message().Photo.File
-			userStore[userID] = "[Profile Screenshot]"
-			log.Printf("[photo] user=%d stored as pending profile screenshot", userID)
-
-			if err := c.Send(t(lang, "profile_screenshot_received")); err != nil {
-				return err
-			}
-			return sendPaymentInstructions(c, lang)
-		}
-
-		// If we have their email or phone number, we can proceed with the payment verification
-		caption := fmt.Sprintf("🚨 <b>NEW PAYMENT PROOF</b>\n\n"+
-			"<b>User:</b> %s\n"+
-			"<b>ID:</b> <code>%d</code>\n"+
-			"<b>Account:</b> <code>%s</code>",
-			generateTelegramUserLink(userName, userID), userID, contactInfo)
-
-		adminMarkup := &tele.ReplyMarkup{}
-		btnWithData := btnConfirmPay
-		btnWithData.Data = fmt.Sprintf("%d", userID)
-
-		adminMarkup.Inline(adminMarkup.Row(btnWithData))
-
-		paymentPhoto := &tele.Photo{File: c.Message().Photo.File}
-
-		profileFile, hasProfileScreenshot := pendingProfileScreenshot[userID]
-		log.Printf("[photo] user=%d forwarding payment proof has_pending_profile_screenshot=%v", userID, hasProfileScreenshot)
-
-		if hasProfileScreenshot {
-			// Send both screenshots together as one album, caption on the first item.
-			profilePhoto := &tele.Photo{File: profileFile, Caption: caption}
-
-			if _, err := b.SendAlbum(tele.ChatID(adminID), tele.Album{profilePhoto, paymentPhoto}, &tele.SendOptions{ParseMode: tele.ModeHTML}); err != nil {
-				log.Println("Failed to forward payment proof album to admin:", err)
-				return c.Send(t(lang, "proof_error"))
-			}
-			log.Printf("[photo] user=%d album sent to admin", userID)
-			delete(pendingProfileScreenshot, userID)
-
-			// Media groups can't carry an inline keyboard, so the Confirm button
-			// goes out as its own follow-up message.
-			if _, err := b.Send(tele.ChatID(adminID), "⬆️ Tap below to confirm the payment above.", adminMarkup); err != nil {
-				log.Println("Failed to send confirm-payment button to admin:", err)
-			} else {
-				log.Printf("[photo] user=%d confirm-payment button sent to admin", userID)
-			}
-		} else {
-			paymentPhoto.Caption = caption
-
-			if _, err := b.Send(tele.ChatID(adminID), paymentPhoto, &tele.SendOptions{
-				ParseMode:   tele.ModeHTML,
-				ReplyMarkup: adminMarkup,
-			}); err != nil {
+		switch {
+		case hasContact:
+			// We already know who they are (e.g. a valid /start payload), so this
+			// screenshot is straightforwardly the payment proof.
+			if err := forwardPaymentProofToAdmin(b, userID, userName, contactInfo, c.Message().Photo.File, nil); err != nil {
 				log.Println("Failed to forward to admin:", err)
 				return c.Send(t(lang, "proof_error"))
 			}
-			log.Printf("[photo] user=%d single payment-proof photo with confirm button sent to admin", userID)
-		}
+			return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 
-		return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+		case hasPendingPayment:
+			// This is their answer to the contact request: a profile screenshot.
+			// We now have both pieces, so forward them together.
+			profileFile := c.Message().Photo.File
+			userStore[userID] = "[Profile Screenshot]"
+
+			if err := forwardPaymentProofToAdmin(b, userID, userName, userStore[userID], pendingFile, &profileFile); err != nil {
+				log.Println("Failed to forward payment proof album to admin:", err)
+				return c.Send(t(lang, "proof_error"))
+			}
+			delete(pendingPaymentScreenshot, userID)
+			return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+
+		default:
+			// First screenshot: hold it as the payment proof, then ask who sent it.
+			pendingPaymentScreenshot[userID] = c.Message().Photo.File
+			log.Printf("[photo] user=%d stored as pending payment screenshot", userID)
+
+			if err := c.Send(t(lang, "payment_screenshot_received")); err != nil {
+				return err
+			}
+			return sendContactRequest(c, lang)
+		}
 	})
 
 	// 4. Handle non-photo messages (Error handling)
@@ -274,16 +285,28 @@ func main() {
 		contactType, isValid := validateContact(input)
 		log.Printf("[text] user=%d valid_contact=%v", userID, isValid)
 
-		if isValid {
-			userStore[userID] = input
-			linkedMsg := fmt.Sprintf(t(lang, "linked_contact"), contactTypeLabel(lang, contactType), input)
-			if err := c.Send(linkedMsg, &tele.SendOptions{ParseMode: tele.ModeMarkdown}); err != nil {
-				return err
-			}
+		if !isValid {
+			return c.Send(t(lang, "invalid_contact"))
+		}
+
+		userStore[userID] = input
+		linkedMsg := fmt.Sprintf(t(lang, "linked_contact"), contactTypeLabel(lang, contactType), input)
+		if err := c.Send(linkedMsg, &tele.SendOptions{ParseMode: tele.ModeMarkdown}); err != nil {
+			return err
+		}
+
+		pendingFile, hasPendingPayment := pendingPaymentScreenshot[userID]
+		if !hasPendingPayment {
+			// They typed their contact info before sending a payment screenshot.
 			return sendPaymentInstructions(c, lang)
 		}
 
-		return c.Send(t(lang, "invalid_contact"))
+		if err := forwardPaymentProofToAdmin(b, userID, c.Sender().Username, input, pendingFile, nil); err != nil {
+			log.Println("Failed to forward to admin:", err)
+			return c.Send(t(lang, "proof_error"))
+		}
+		delete(pendingPaymentScreenshot, userID)
+		return c.Send(t(lang, "proof_sent"), &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 	})
 
 	// 6. Handle Admin clicking "Confirm Payment"

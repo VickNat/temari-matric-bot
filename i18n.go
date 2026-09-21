@@ -66,6 +66,10 @@ var translations = map[string]map[Lang]string{
 		LangEN: "✅ Got your profile screenshot!",
 		LangAM: "✅ የፕሮፋይል ስክሪንሾትዎ ደርሶናል!",
 	},
+	"payment_screenshot_received": {
+		LangEN: "✅ Got your payment screenshot! Now, let's link it to your account.",
+		LangAM: "✅ የክፍያ ስክሪንሾትዎ ደርሶናል! አሁን ከአካውንትዎ ጋር እናገናኘው።",
+	},
 	"profile_screenshot_error": {
 		LangEN: "Something went wrong while receiving your screenshot. Please try again or contact @TemariAppSupport.",
 		LangAM: "ስክሪንሾትዎን በመቀበል ላይ ችግር ተፈጥሯል። እባክዎ እንደገና ይሞክሩ ወይም @TemariAppSupport ያግኙ።",
