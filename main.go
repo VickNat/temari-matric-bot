@@ -38,7 +38,9 @@ var userStore = make(map[int64]string)
 // two can be forwarded to the admin together as one album.
 var pendingProfileScreenshot = make(map[int64]tele.File)
 
-var adminID, _ = strconv.ParseInt(os.Getenv("ADMIN_ID"), 10, 64)
+// adminID is set in main(), after .env is loaded — a package-level initializer
+// would run before godotenv.Load() and always see an empty ADMIN_ID.
+var adminID int64
 
 func validateContact(input string) (string, bool) {
 	input = strings.TrimSpace(input)
@@ -120,6 +122,12 @@ func contactTypeLabel(lang Lang, contactType string) string {
 func main() {
 	// Silently fail if the .env file is not found
 	_ = godotenv.Load()
+
+	parsedAdminID, err := strconv.ParseInt(os.Getenv("ADMIN_ID"), 10, 64)
+	if err != nil {
+		log.Fatal("ADMIN_ID env var is missing or invalid: ", err)
+	}
+	adminID = parsedAdminID
 
 	pref := tele.Settings{
 		Token:  os.Getenv("TOKEN"),
